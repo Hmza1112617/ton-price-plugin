@@ -1,0 +1,286 @@
+import requests
+from concurrent.futures import ThreadPoolExecutor
+import math
+from typing import Any
+from base_plugin import BasePlugin, HookResult, HookStrategy
+
+__id__          = "ton_analyzer_drr_r2"
+__name__        = "اسعار التون و توقعات"
+__description__ = "الامر:\n .ton"
+__author__      = "@DRR_R2"
+__version__     = "1.0.0"
+__icon__        = "msg_info"
+__app_version__ = ">=12.5.1"
+__requirements__ = ["requests"]
+
+def get_coingecko_price_DRR_R2():
+    r_DRR_R2 = requests.get("https://api.coingecko.com/api/v3/simple/price", params={"ids": "the-open-network", "vs_currencies": "usd"}, timeout=10)
+    return r_DRR_R2.json()["the-open-network"]["usd"]
+
+def get_binance_price_DRR_R2():
+    r_DRR_R2 = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "TONUSDT"}, timeout=10)
+    return float(r_DRR_R2.json()["price"])
+
+def get_coingecko_chart_DRR_R2():
+    r_DRR_R2 = requests.get("https://api.coingecko.com/api/v3/coins/the-open-network/market_chart", params={"vs_currency": "usd", "days": "30"}, timeout=10)
+    return [p_DRR_R2[1] for p_DRR_R2 in r_DRR_R2.json()["prices"]]
+
+def get_binance_klines_DRR_R2():
+    r_DRR_R2 = requests.get("https://api.binance.com/api/v3/klines", params={"symbol": "TONUSDT", "interval": "1d", "limit": "50"}, timeout=10)
+    klines_DRR_R2 = r_DRR_R2.json()
+    return {
+        "closes": [float(k[4]) for k in klines_DRR_R2],
+        "volumes": [float(k[5]) for k in klines_DRR_R2],
+        "highs": [float(k[2]) for k in klines_DRR_R2],
+        "lows": [float(k[3]) for k in klines_DRR_R2],
+        "opens": [float(k[1]) for k in klines_DRR_R2]
+    }
+
+def calc_ma_DRR_R2(prices, period):
+    if len(prices) < period:
+        return None
+    return sum(prices[-period:]) / period
+
+def calc_ema_DRR_R2(prices, period):
+    if len(prices) < period:
+        return None
+    multiplier_DRR_R2 = 2 / (period + 1)
+    ema_DRR_R2 = sum(prices[:period]) / period
+    for p_DRR_R2 in prices[period:]:
+        ema_DRR_R2 = (p_DRR_R2 - ema_DRR_R2) * multiplier_DRR_R2 + ema_DRR_R2
+    return ema_DRR_R2
+
+def calc_rsi_DRR_R2(prices, period=14):
+    if len(prices) < period + 1:
+        return 50
+    gains_DRR_R2, losses_DRR_R2 = [], []
+    for i_DRR_R2 in range(1, len(prices)):
+        change_DRR_R2 = prices[i_DRR_R2] - prices[i_DRR_R2 - 1]
+        gains_DRR_R2.append(max(change_DRR_R2, 0))
+        losses_DRR_R2.append(max(-change_DRR_R2, 0))
+    avg_gain_DRR_R2 = sum(gains_DRR_R2[-period:]) / period
+    avg_loss_DRR_R2 = sum(losses_DRR_R2[-period:]) / period
+    if avg_loss_DRR_R2 == 0:
+        return 100
+    rs_DRR_R2 = avg_gain_DRR_R2 / avg_loss_DRR_R2
+    return 100 - (100 / (1 + rs_DRR_R2))
+
+def calc_macd_DRR_R2(closes, fast=12, slow=26, signal=9):
+    if len(closes) < slow + signal:
+        return None, None, None
+    ema_fast_DRR_R2 = []
+    ema_slow_DRR_R2 = []
+    mf_DRR_R2 = 2 / (fast + 1)
+    ms_DRR_R2 = 2 / (slow + 1)
+    ef_DRR_R2 = sum(closes[:fast]) / fast
+    es_DRR_R2 = sum(closes[:slow]) / slow
+    for p_DRR_R2 in closes:
+        ef_DRR_R2 = (p_DRR_R2 - ef_DRR_R2) * mf_DRR_R2 + ef_DRR_R2
+        ema_fast_DRR_R2.append(ef_DRR_R2)
+        es_DRR_R2 = (p_DRR_R2 - es_DRR_R2) * ms_DRR_R2 + es_DRR_R2
+        ema_slow_DRR_R2.append(es_DRR_R2)
+    macd_line_DRR_R2 = [f - s for f, s in zip(ema_fast_DRR_R2, ema_slow_DRR_R2)]
+    if len(macd_line_DRR_R2) < signal:
+        return None, None, None
+    sm_DRR_R2 = 2 / (signal + 1)
+    signal_line_DRR_R2 = sum(macd_line_DRR_R2[:signal]) / signal
+    for v_DRR_R2 in macd_line_DRR_R2[signal:]:
+        signal_line_DRR_R2 = (v_DRR_R2 - signal_line_DRR_R2) * sm_DRR_R2 + signal_line_DRR_R2
+    histogram_DRR_R2 = macd_line_DRR_R2[-1] - signal_line_DRR_R2
+    return macd_line_DRR_R2[-1], signal_line_DRR_R2, histogram_DRR_R2
+
+def calc_bollinger_DRR_R2(prices, period=20, std_dev=2):
+    if len(prices) < period:
+        return None, None, None
+    slice_DRR_R2 = prices[-period:]
+    ma_DRR_R2 = sum(slice_DRR_R2) / period
+    variance_DRR_R2 = sum((p - ma_DRR_R2) ** 2 for p in slice_DRR_R2) / period
+    std_DRR_R2 = math.sqrt(variance_DRR_R2)
+    upper_DRR_R2 = ma_DRR_R2 + std_dev * std_DRR_R2
+    lower_DRR_R2 = ma_DRR_R2 - std_dev * std_DRR_R2
+    return upper_DRR_R2, ma_DRR_R2, lower_DRR_R2
+
+def calc_stochastic_DRR_R2(highs, lows, closes, period=14):
+    if len(closes) < period:
+        return None, None
+    recent_highs_DRR_R2 = highs[-period:]
+    recent_lows_DRR_R2 = lows[-period:]
+    highest_DRR_R2 = max(recent_highs_DRR_R2)
+    lowest_DRR_R2 = min(recent_lows_DRR_R2)
+    if highest_DRR_R2 == lowest_DRR_R2:
+        return 50, 50
+    k_DRR_R2 = ((closes[-1] - lowest_DRR_R2) / (highest_DRR_R2 - lowest_DRR_R2)) * 100
+    return k_DRR_R2, k_DRR_R2 * 0.8 + 20
+
+def calc_atr_DRR_R2(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return None
+    true_ranges_DRR_R2 = []
+    for i_DRR_R2 in range(1, len(closes)):
+        high_DRR_R2 = highs[i_DRR_R2]
+        low_DRR_R2 = lows[i_DRR_R2]
+        prev_close_DRR_R2 = closes[i_DRR_R2 - 1]
+        tr_DRR_R2 = max(high_DRR_R2 - low_DRR_R2, abs(high_DRR_R2 - prev_close_DRR_R2), abs(low_DRR_R2 - prev_close_DRR_R2))
+        true_ranges_DRR_R2.append(tr_DRR_R2)
+    return sum(true_ranges_DRR_R2[-period:]) / period
+
+def calc_volume_trend_DRR_R2(volumes, short=5, long=20):
+    if len(volumes) < long:
+        return None
+    avg_short_DRR_R2 = sum(volumes[-short:]) / short
+    avg_long_DRR_R2 = sum(volumes[-long:]) / long
+    return avg_short_DRR_R2 / avg_long_DRR_R2 if avg_long_DRR_R2 > 0 else None
+
+def analyze_DRR_R2():
+    out_DRR_R2 = []
+    out_DRR_R2.append("= " * 15)
+    
+    with ThreadPoolExecutor() as executor_DRR_R2:
+        cg_price_DRR_R2 = executor_DRR_R2.submit(get_coingecko_price_DRR_R2)
+        bn_price_DRR_R2 = executor_DRR_R2.submit(get_binance_price_DRR_R2)
+        cg_chart_DRR_R2 = executor_DRR_R2.submit(get_coingecko_chart_DRR_R2)
+        bn_data_DRR_R2 = executor_DRR_R2.submit(get_binance_klines_DRR_R2)
+
+    prices_cg_DRR_R2 = cg_chart_DRR_R2.result()
+    prices_cg_DRR_R2.append(bn_price_DRR_R2.result())
+
+    bn_res_DRR_R2 = bn_data_DRR_R2.result()
+    closes_DRR_R2 = bn_res_DRR_R2["closes"]
+    volumes_DRR_R2 = bn_res_DRR_R2["volumes"]
+    highs_DRR_R2 = bn_res_DRR_R2["highs"]
+    lows_DRR_R2 = bn_res_DRR_R2["lows"]
+    opens_DRR_R2 = bn_res_DRR_R2["opens"]
+
+    current_price_DRR_R2 = (cg_price_DRR_R2.result() + bn_price_DRR_R2.result()) / 2
+
+    out_DRR_R2.append("--- مصادر الأسعار (@DRR_R2) ---")
+    out_DRR_R2.append(f"CoinGecko:  ${cg_price_DRR_R2.result():,.2f}")
+    out_DRR_R2.append(f"Binance:    ${bn_price_DRR_R2.result():,.2f}")
+    out_DRR_R2.append(f"متوسط:      ${current_price_DRR_R2:,.2f}")
+
+    ma_7_DRR_R2 = calc_ma_DRR_R2(prices_cg_DRR_R2, 7)
+    ma_30_DRR_R2 = calc_ma_DRR_R2(prices_cg_DRR_R2, 30)
+    ema_12_DRR_R2 = calc_ema_DRR_R2(closes_DRR_R2, 12)
+    ema_26_DRR_R2 = calc_ema_DRR_R2(closes_DRR_R2, 26)
+    rsi_DRR_R2 = calc_rsi_DRR_R2(closes_DRR_R2)
+    macd_DRR_R2, macd_signal_DRR_R2, macd_hist_DRR_R2 = calc_macd_DRR_R2(closes_DRR_R2)
+    bb_upper_DRR_R2, bb_mid_DRR_R2, bb_lower_DRR_R2 = calc_bollinger_DRR_R2(prices_cg_DRR_R2)
+    stoch_k_DRR_R2, stoch_d_DRR_R2 = calc_stochastic_DRR_R2(highs_DRR_R2, lows_DRR_R2, closes_DRR_R2)
+    atr_DRR_R2 = calc_atr_DRR_R2(highs_DRR_R2, lows_DRR_R2, closes_DRR_R2)
+    vol_ratio_DRR_R2 = calc_volume_trend_DRR_R2(volumes_DRR_R2)
+
+    price_change_24h_DRR_R2 = ((closes_DRR_R2[-1] - closes_DRR_R2[-2]) / closes_DRR_R2[-2]) * 100
+    signals_DRR_R2 = []
+    signals_names_DRR_R2 = []
+
+    if rsi_DRR_R2 < 30:
+        signals_DRR_R2.append(2)
+        signals_names_DRR_R2.append("صعود (RSI Oversold)")
+    elif rsi_DRR_R2 > 70:
+        signals_DRR_R2.append(-2)
+        signals_names_DRR_R2.append("نزول (RSI Overbought)")
+
+    if ma_7_DRR_R2 and ma_30_DRR_R2:
+        if current_price_DRR_R2 > ma_7_DRR_R2 > ma_30_DRR_R2:
+            signals_DRR_R2.append(2)
+            signals_names_DRR_R2.append("صعود (Golden Cross MA)")
+        elif current_price_DRR_R2 < ma_7_DRR_R2 < ma_30_DRR_R2:
+            signals_DRR_R2.append(-2)
+            signals_names_DRR_R2.append("نزول (Death Cross MA)")
+
+    if ma_7_DRR_R2:
+        if current_price_DRR_R2 > ma_7_DRR_R2:
+            signals_DRR_R2.append(1)
+            signals_names_DRR_R2.append("صعود (فوق MA7)")
+        else:
+            signals_DRR_R2.append(-1)
+            signals_names_DRR_R2.append("نزول (تحت MA7)")
+
+    if ema_12_DRR_R2 and ema_26_DRR_R2:
+        if ema_12_DRR_R2 > ema_26_DRR_R2:
+            signals_DRR_R2.append(1)
+            signals_names_DRR_R2.append("صعود (EMA Crossover)")
+        else:
+            signals_DRR_R2.append(-1)
+            signals_names_DRR_R2.append("نزول (EMA Crossover)")
+
+    if macd_DRR_R2 is not None and macd_hist_DRR_R2 is not None:
+        if macd_DRR_R2 > macd_signal_DRR_R2 and macd_hist_DRR_R2 > 0:
+            signals_DRR_R2.append(2)
+            signals_names_DRR_R2.append("صعود (MACD Bullish)")
+        elif macd_DRR_R2 < macd_signal_DRR_R2 and macd_hist_DRR_R2 < 0:
+            signals_DRR_R2.append(-2)
+            signals_names_DRR_R2.append("نزول (MACD Bearish)")
+
+    if bb_upper_DRR_R2 and bb_lower_DRR_R2:
+        if current_price_DRR_R2 < bb_lower_DRR_R2:
+            signals_DRR_R2.append(2)
+            signals_names_DRR_R2.append("صعود (Bollinger Lower)")
+        elif current_price_DRR_R2 > bb_upper_DRR_R2:
+            signals_DRR_R2.append(-2)
+            signals_names_DRR_R2.append("نزول (Bollinger Upper)")
+
+    if stoch_k_DRR_R2 is not None:
+        if stoch_k_DRR_R2 < 20:
+            signals_DRR_R2.append(1)
+            signals_names_DRR_R2.append("صعود (Stochastic Oversold)")
+        elif stoch_k_DRR_R2 > 80:
+            signals_DRR_R2.append(-1)
+            signals_names_DRR_R2.append("نزول (Stochastic Overbought)")
+
+    if vol_ratio_DRR_R2 and vol_ratio_DRR_R2 > 1.5:
+        signals_DRR_R2.append(1 if price_change_24h_DRR_R2 > 0 else -1)
+        dir_DRR_R2 = 'صعود' if price_change_24h_DRR_R2 > 0 else 'نزول'
+        signals_names_DRR_R2.append(f"{dir_DRR_R2} (Volume Spike {vol_ratio_DRR_R2:.1f}x)")
+
+    total_DRR_R2 = sum(signals_DRR_R2)
+    bullish_DRR_R2 = sum(1 for s in signals_DRR_R2 if s > 0)
+    bearish_DRR_R2 = sum(1 for s in signals_DRR_R2 if s < 0)
+
+    out_DRR_R2.append("")
+    out_DRR_R2.append("--- الإشارات ---")
+    for name_DRR_R2 in signals_names_DRR_R2:
+        out_DRR_R2.append(f"  {name_DRR_R2}")
+
+    out_DRR_R2.append("")
+    out_DRR_R2.append("--- التوقع النهائي ---")
+    strength_DRR_R2 = abs(total_DRR_R2) / (len(signals_DRR_R2) * 2) * 100 if signals_DRR_R2 else 0
+    if total_DRR_R2 > 2:
+        prediction_DRR_R2 = f"صعود قوي ({strength_DRR_R2:.0f}%)"
+    elif total_DRR_R2 > 0:
+        prediction_DRR_R2 = f"صعود ({strength_DRR_R2:.0f}%)"
+    elif total_DRR_R2 < -2:
+        prediction_DRR_R2 = f"نزول قوي ({strength_DRR_R2:.0f}%)"
+    elif total_DRR_R2 < 0:
+        prediction_DRR_R2 = f"نزول ({strength_DRR_R2:.0f}%)"
+    else:
+        prediction_DRR_R2 = "محايد"
+
+    out_DRR_R2.append(f"  إشارات صعودية: {bullish_DRR_R2}")
+    out_DRR_R2.append(f"  إشارات هبوطية: {bearish_DRR_R2}")
+    out_DRR_R2.append(f"  النتيجة: {prediction_DRR_R2}")
+    out_DRR_R2.append("= " * 15)
+    
+    return "\n".join(out_DRR_R2)
+
+class TonPlugin_DRR_R2(BasePlugin):
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        self.log("TON Analyzer loaded by @DRR_R2")
+
+    def on_send_message_hook(self, account: int, params: Any) -> HookResult:
+        message_DRR_R2 = getattr(params, "message", None)
+        if not isinstance(message_DRR_R2, str):
+            return HookResult()
+        
+        if message_DRR_R2.strip() == ".ton":
+            try:
+                self.log("Fetching TON data @DRR_R2")
+                result_text_DRR_R2 = analyze_DRR_R2()
+                params.message = result_text_DRR_R2
+                return HookResult(strategy=HookStrategy.MODIFY, params=params)
+            except Exception as e_DRR_R2:
+                params.message = f"Error fetching TON data: {e_DRR_R2} - @DRR_R2"
+                return HookResult(strategy=HookStrategy.MODIFY, params=params)
+
+        return HookResult()
